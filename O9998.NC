@@ -1,105 +1,213 @@
-(------------------------------------------------------------------)
-( Program Name: SINGLE_POINT_THREAD_MILL                      )
-( Author: Gemini Advanced                                       )
-( Date: 2024-12-25                                              )
-( Version: v0.01                                                )
-( Description: This subprogram single-point thread mills multiple)
-(              holes helically. It uses the tool wear offsets   )
-(              for diameter and length. Helical entry starts    )
-(              from the center of the hole and works upwards.   )
-(              Tool cuts to the thread major diameter at the   )
-(              finished depth. Radial depth per pass controls  )
-(              the infeed in the X-axis. Overshoots the top of  )
-(              the hole by one thread pitch to ensure complete  )
-(              threads. Includes a retract plane parameter.     )
-(              Performs parameter checks to prevent errors.     )
-(              Uses the F parameter for all feedrates.          )
-(              Adds a final radial pass if depth doesn't divide )
-(              evenly.                                         )
-(------------------------------------------------------------------)
-( Macro Variables:                                                )
-( #4  - I: TPI (Threads Per Inch)                                )
-( #7  - D: Thread major diameter                                 )
-( #26 - Z: Z coordinate where the thread ends                     )
-( #20 - T: Tool number                                             )
-( #22 - V: Radial depth per pass (in X-axis)                       )
-( #9  - F: Feedrate                                               )
-( #18 - R: Retract plane Z-coordinate                             )
-( #24 - X: X coordinate of hole center                             )
-( #25 - Y: Y coordinate of hole center                             )
-( #13 - M: Optional hole top height (Z-coordinate)                )
-(------------------------------------------------------------------)
+(----------------------------------------------------------------------)
+( Helical Thread Milling Macro - Internal Threads - with Improvements )
+( Gordon Lenz )
+( Pre-NGC Haas Controller Compatible )
+(----------------------------------------------------------------------)
 
-O9998  
-    (Check for missing parameters)
-    IF [#4 EQ 0] THEN #3000 = 1 (Alarm if TPI is missing)
-    IF [#7 EQ 0] THEN #3000 = 2 (Alarm if major diameter is missing)
-    IF [#26 EQ 0] THEN #3000 = 3 (Alarm if thread end Z is missing)
-    IF [#20 EQ 0] THEN #3000 = 4 (Alarm if tool number is missing)
-    IF [#22 EQ 0] THEN #3000 = 5 (Alarm if radial depth is missing)
-    IF [#9 EQ 0] THEN #3000 = 6 (Alarm if feedrate is missing)
-    IF [#18 EQ 0] THEN #3000 = 7 (Alarm if retract plane is missing)
-    IF [#24 EQ 0] THEN #3000 = 8 (Alarm if X coordinate is missing)
-    IF [#25 EQ 0] THEN #3000 = 9 (Alarm if Y coordinate is missing)
-    IF [#3000 NE 0] GOTO 9999 (Jump to alarm section if any parameter is missing)
+(--------------------------)
+( Variable Table           )
+(--------------------------)
+( #1  ->  A  RADIAL STEP OVER FOR EACH RADIAL PASS                )
+( #3  ->  C  CLIMB (1) OR CONVENTIONAL (0) MILLING                 )
+( #7  ->  D  MAJOR DIAMETER OF THREAD                              )
+( #9  ->  I  THREADS PER INCH (TPI)                               )
+( #13 ->  M  TOOL NUMBER (WILL GRAB DIAMETER FROM #4101-4120)      )
+( #17 ->  Q  FEED RATE (INCHES PER MINUTE)                        )
+( #18 ->  R  SAFE HEIGHT ABOVE PART FOR RAPID MOVES                )
+( #19 ->  S  FEED RATE ADJUSTED FOR CHIP THINNING (INCHES PER MIN) )
+( #20 ->  T  TOOL DIAMETER                                         )
+( #24 ->  X  CENTER OF HOLE X-AXIS                                )
+( #25 ->  Y  CENTER OF HOLE Y-AXIS                                )
+( #26 ->  Z  DEPTH OF THREAD                                      )
+( #115 ->     INTERNAL VARIABLE - PITCH (#1 / TPI)                  )
+( #116 ->     INTERNAL VARIABLE - RADIUS OF THE TOOL PATH          )
+( #117 ->     INTERNAL VARIABLE - NUMBER OF RADIAL PASSES          )
+( #118 ->     INTERNAL VARIABLE - STARTING RADIUS                  )
+( #119 ->     INTERNAL VARIABLE - RADIUS INCREMENT                 )
+( #120 ->     INTERNAL VARIABLE - CURRENT Z LEVEL                    )
+( #121 ->     INTERNAL VARIABLE - NUMBER OF Z PASSES                 )
+( #122 ->     INTERNAL VARIABLE - Z PASS COUNTER                    )
+( #123 ->     INTERNAL VARIABLE - RADIAL PASS COUNTER                )
+( #124 ->     INTERNAL VARIABLE - CURRENT RADIUS                     )
 
-    (Set hole top height)
-    IF [#13 EQ 0] THEN #13 = #5043 (Use Z0 if M is not provided)
+(----------------------------------------------------------------------)
 
-    G00 G90 Z[#18 + .1]    (Rapid to retract plane + .1)
-    G43 Z.1 H#20           (Apply tool length offset from tool number)
-    G01 Z#18 F#9           (Feed to retract plane)
-    
-    #100 = [#7 / 2] / #22  (Calculate number of passes based on radial depth)
-    #101 = 1              (Initialize pass counter)
-    
-    WHILE [#101 LE #100] DO1  (Loop for each pass)
-        #102 = #22 * #101   (Calculate current radial depth)
-        IF [#102 GT [#7 / 2]] THEN #102 = [#7 / 2] (Limit to thread radius)
-        
-        G01 X#24 Y#25 F#9  (Feed to hole center)
-        G01 Z#26 F#9       (Feed down to final thread depth)
-        G41 X[#102] D#20    (Compensate with tool diameter offset)
-        G03 X[#102 + .1] I[-#102] F#9 (Helical entry move) 
+O1000 (HELICAL THREAD MILLING MACRO)
 
-        (Calculate Z movement for this pass, overshooting by one pitch)
-        #103 = ABS(#26 - #13) + [1 / #4]  (Total distance + one pitch)
-        #104 = #103 - (#101 - 1) * #22 * [1 / #4] (Remaining distance)
-        IF [#104 GT [#22 * #4]] THEN #104 = #22 * #4 (Limit to one pass)
+(--------------------------)
+( Parameter Input Checks   )
+(--------------------------)
 
-        G91 G03 I[-#102] Z[1 / #4] L[#104 - 1] F#9 (Helical threading upwards)
+IF[#17 LE 0] THEN #3000 = 1 (FEED RATE MUST BE POSITIVE)
+IF[#9 LE 0] THEN #3000 = 2 (THREADS PER INCH MUST BE POSITIVE)
+IF[#26 GE 0] THEN #3000 = 3 (THREAD DEPTH MUST BE NEGATIVE)
+IF[#7 LE 0] THEN #3000 = 4 (THREAD MAJOR DIAMETER MUST BE POSITIVE)
+IF[#1 LE 0] THEN #3000 = 5 (RADIAL STEP OVER MUST BE POSITIVE)
+IF[#13 LE 0] THEN #3000 = 6 (INVALID TOOL NUMBER)
 
-        G90 G03 X[#102 + .1] I[-#102] F#9 (Helical exit move)
-        G01 X#24 Y#25 F#9  (Return to center)
+(--------------------------)
+( Tool Diameter Lookup      )
+(--------------------------)
 
-        #101 = #101 + 1    (Increment pass counter)
-    END1
+#20 = #[4000 + #13] (GET TOOL DIAMETER FROM MACRO VAR, TOOL OFFSET #s START AT #4001)
 
-    (Check if a final radial pass is needed)
-    #105 = [#7 / 2] MOD #22 (Calculate remainder of radius divided by radial depth)
-    IF [#105 GT 0] THEN
-        G01 X#24 Y#25 F#9  (Feed to hole center)
-        G01 Z#26 F#9       (Feed down to final thread depth)
-        G41 X[#7 / 2] D#20  (Compensate and move to major diameter)
-        G03 X[[#7 / 2] + .1] I[-[#7 / 2]] F#9 (Helical entry move)
+IF[#20 GE #7] THEN #3000 = 8 (TOOL DIAMETER LARGER THAN THREAD MAJOR DIAMETER)
 
-        (Calculate Z movement for the final pass, overshooting by one pitch)
-        #103 = ABS(#26 - #13) + [1 / #4]  (Total distance + one pitch)
-        #104 = #103 - #100 * #22 * [1 / #4] (Remaining distance)
-        IF [#104 GT [#22 * #4]] THEN #104 = #22 * #4 (Limit to one pass)
+(---------------------------------------)
+( Calculations                          )
+(---------------------------------------)
 
-        G91 G03 I[-[#7 / 2]] Z[1 / #4] L[#104 - 1] F#9 (Helical threading upwards)
+#115 = 1 / #9 (CALCULATE PITCH FROM TPI)
+#116 = [#7 / 2] - [#20 / 2] (MAXIMUM RADIUS OF THE TOOL PATH)
+#118 = [#20 / 10] (STARTING RADIUS -  SMALL VALUE TO ENSURE IT DOESN'T START OUTSIDE THE BORE)
+#117 = FIX[[#116 - #118] / #1] (NUMBER OF RADIAL PASSES - INITIAL CALCULATION)
+IF[[#116 - #118] / #1 GT #117] THEN #117 = #117 + 1 (IF THERE'S A REMAINDER, ADD 1)
+#119 = [[#116 - #118] / #117] (RADIUS INCREMENT FOR EACH PASS)
+IF[#119 LT .0005] THEN #119 = .0005 (LIMIT THE SIZE OF THE INCREMENT TO AVOID EXCESSIVE PASSES)
 
-        G90 G03 X[[#7 / 2] + .1] I[-[#7 / 2]] F#9 (Helical exit move)
-        G01 X#24 Y#25 F#9  (Return to center)
-    ENDIF
+(--------------------------)
+( Initialization           )
+(--------------------------)
 
-    G01 Z#18 F#9           (Feed to retract plane)
-    G00 Z[#18 + .1]       (Rapid retract to retract plane + .1)
-    G28 G91 Z0             (Return to Z home)
-    M99                    (End of subprogram)
+G90 G54 G00 X#24 Y#25 (RAPID TO HOLE CENTER)
+#120 = 0 (CURRENT Z LEVEL)
+#121 = ABS[#26] / #115 (NUMBER OF Z PASSES, BASED ON PITCH)
+#122 = 1 (Z PASS COUNTER)
+#123 = 1 (RADIAL PASS COUNTER)
+#124 = #118 (INITIALIZE CURRENT RADIUS)
 
-(Alarm section)
-N9999 
-    #3000 = #3000 (Force the alarm)
-    M99
+(--------------------------)
+( Tool Compensation        )
+(--------------------------)
+
+G41 D#13 (APPLY TOOL DIAMETER COMP)
+G43 H#13 (APPLY TOOL LENGTH COMP)
+
+(--------------------------)
+( Approach                )
+(--------------------------)
+
+G00 Z#18 (RAPID TO SAFE HEIGHT)
+
+(--------------------------------------------------)
+( M0 Message with Pass Information                 )
+(--------------------------------------------------)
+
+#3006 = 1 (STOP FOR OPERATOR, MESSAGE IN BRACKETS)
+M00 ([#117] RADIAL PASSES, D [#7], [#9] TPI, PITCH [#115])
+
+(-------------------------------)
+( Main Loop - Radial Passes    )
+(-------------------------------)
+
+WHILE[#123 LE #117] DO1 (LOOP FOR EACH RADIAL PASS)
+  #120 = 0 (RESET Z LEVEL FOR EACH RADIAL PASS)
+  #122 = 1 (RESET Z PASS COUNTER)
+  (--------------------------)
+  ( Chip Thinning           )
+  (--------------------------)
+
+  #19 = #17 / SIN(ACOS((#20 - 2.0 * #124) / #20)) (FEED RATE ADJUST, MORE ACCURATE, ADJUST BASED ON CURRENT RADIUS)
+  IF[#19 LT #17] THEN #19 = #17 (ENSURE FEED DOES NOT GO BELOW MIN)
+
+  G01 Z#120 F#17 (FEED TO STARTING Z)
+
+  (------------------------------)
+  ( Inner Loop - Z-Level Passes )
+  (------------------------------)
+
+  WHILE[#122 LE #121] DO2 (LOOP FOR EACH Z-LEVEL PASS)
+
+    IF[#3 EQ 1] GOTO10 (CLIMB MILL)
+    IF[#3 EQ 0] GOTO20 (CONVENTIONAL MILL)
+
+    N10 (CLIMB MILLING)
+    G01 X[#24 + #124] Y#25 F#19 (FEED TO CURRENT RADIUS - CLIMB)
+    G03 X[#24 + #124] Y#25 I-#124 Z[#120 - #115] F#19 (HELICAL INTERPOLATION - CLIMB)
+    GOTO30
+
+    N20 (CONVENTIONAL MILLING)
+    G01 X[#24 + #124] Y#25 F#19 (FEED TO CURRENT RADIUS - CONVENTIONAL)
+    G02 X[#24 + #124] Y#25 I-#124 Z[#120 - #115] F#19 (HELICAL INTERPOLATION - CONVENTIONAL)
+    GOTO30
+
+    N30 (END OF CUTTING FOR Z-LEVEL PASS)
+
+    #120 = #120 - #115 (DECREMENT Z LEVEL)
+    #122 = #122 + 1 (INCREMENT Z PASS COUNTER)
+
+  END2
+
+  #124 = #124 + #119 (INCREMENT RADIUS FOR NEXT RADIAL PASS)
+  #123 = #123 + 1 (INCREMENT RADIAL PASS COUNTER)
+  G00 Z#18 (RAPID TO SAFE HEIGHT AT END OF EACH RADIAL PASS)
+
+END1
+
+(--------------------------)
+( Spring Pass              )
+(--------------------------)
+
+  #120 = 0 (RESET Z FOR SPRING PASS)
+  #122 = 1 (RESET Z PASS COUNTER)
+  G01 Z#120 F#17 (FEED TO STARTING Z)
+
+  WHILE[#122 LE #121] DO3 (LOOP FOR EACH Z-LEVEL PASS FOR SPRING PASS)
+    IF[#3 EQ 1] GOTO40 (CLIMB MILL)
+    IF[#3 EQ 0] GOTO50 (CONVENTIONAL MILL)
+
+    N40 (CLIMB MILLING SPRING PASS)
+    G01 X[#24 + #116] Y#25 F#17 (FEED TO FINAL RADIUS - CLIMB)
+    G03 X[#24 + #116] Y#25 I-#116 Z[#120 - #115] F#17 (HELICAL INTERPOLATION - CLIMB, FINISHING FEED)
+    GOTO60
+
+    N50 (CONVENTIONAL MILLING SPRING PASS)
+    G01 X[#24 + #116] Y#25 F#17 (FEED TO FINAL RADIUS - CONVENTIONAL)
+    G02 X[#24 + #116] Y#25 I-#116 Z[#120 - #115] F#17 (HELICAL INTERPOLATION - CONVENTIONAL, FINISHING FEED)
+    GOTO60
+
+    N60 (END OF SPRING PASS Z-LEVEL)
+     #120 = #120 - #115 (DECREMENT Z LEVEL)
+     #122 = #122 + 1 (INCREMENT Z PASS COUNTER)
+
+  END3
+
+(--------------------------)
+( Retraction               )
+(--------------------------)
+
+G01 X#24 Y#25 F[#17 * 2] (FEED TO CENTER, AT A HIGHER FEED FOR RETRACTION)
+G00 Z#18 (RAPID TO SAFE HEIGHT)
+G40 (CANCEL TOOL COMP)
+
+M99 (RETURN FROM SUBPROGRAM)
+
+(-----------------------------------------------------------------------)
+( Example M98 Call with Alphabetic Shortcuts - INTERNAL THREAD )
+(-----------------------------------------------------------------------)
+( G54 X0 Y0 -  HOLE CENTER )
+( Z0 - TOP OF THE PART )
+( T1 M06 - SELECT TOOL, #4001 WILL HAVE CORRECT TOOL DIAMETER )
+( #4001=0.25 - SET TOOL DIAMETER FOR T1)
+
+( ... REST OF YOUR PROGRAM ...)
+
+( M98 P1000 X0 Y0 Z-0.5 D0.75 I20. A0.01 Q6. M1 R0.1 C1 )
+(   |  |   |  |  |     |     |    |      |   |    |  | |
+(   |  |   |  |  |     |     |    |      |   |    |  | +-- C - MILLING TYPE: 1=CLIMB, 0=CONVENTIONAL (DEFAULT=1)
+(   |  |   |  |  |     |     |    |      |   |    |  +----- R - SAFE Z HEIGHT ABOVE PART (DEFAULT=0.1)
+(   |  |   |  |  |     |     |    |      |   |    +-------- M - TOOL NUMBER (REQUIRED)
+(   |  |   |  |  |     |     |    |      |   +------------- Q - FEED RATE (INCHES PER MINUTE) (REQUIRED)
+(   |  |   |  |  |     |     |    |      +----------------- A - RADIAL STEP OVER FOR EACH RADIAL PASS (REQUIRED)
+(   |  |   |  |  |     |     |    +------------------------ I - THREADS PER INCH (TPI) (REQUIRED)
+(   |  |   |  |  |     |     +----------------------------- D - THREAD MAJOR DIAMETER (REQUIRED)
+(   |  |   |  |  |     +------------------------------------ Z - THREAD DEPTH (NEGATIVE VALUE) (REQUIRED)
+(   |  |   |  |  +------------------------------------------- Y - Y COORDINATE OF HOLE CENTER (REQUIRED)
+(   |  |   |  +------------------------------------------------ X - X COORDINATE OF HOLE CENTER (REQUIRED)
+(   |  |   +------------------------------------------------------ P - SUBPROGRAM NUMBER (1000 IN THIS CASE)
+(   |  +--------------------------------------------------------- M98 - SUBPROGRAM CALL
+(   +------------------------------------------------------------ (COMMENT START)
+
+( ... REST OF YOUR PROGRAM ...)
+
+M30 (END OF PROGRAM)
