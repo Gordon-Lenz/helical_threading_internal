@@ -19,7 +19,7 @@
 |:---|:---|:---|:---|
 |I|#4|Required|TPI (Threads Per Inch)|
 |D|#7|Required|Thread major diameter|
-|Z|#26|Required|Z coordinate where the thread ends|
+|Z|#26|Required|Z coordinate for bottom of thread|
 |T|#20|Required|Tool number|
 |V|#22|Required|Radial depth per pass (in X-axis)|
 |F|#9|Required|Feedrate|
